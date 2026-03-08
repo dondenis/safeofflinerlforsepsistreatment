@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from preprocessing.config_utils import load_config
+
+
+def plot_heatmap(counts: np.ndarray, title: str, path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(4, 3))
+    im = ax.imshow(counts, cmap="viridis")
+    ax.set_title(title)
+    ax.set_xlabel("vaso bin")
+    ax.set_ylabel("iv bin")
+    for iv_bin in range(counts.shape[0]):
+        for vaso_bin in range(counts.shape[1]):
+            count = int(counts[iv_bin, vaso_bin])
+            color = "white" if count > (np.max(counts) * 0.5) else "black"
+            ax.text(vaso_bin, iv_bin, str(count), ha="center", va="center", color=color, fontsize=7)
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Action heatmaps")
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--split", choices=["val", "test"], default="test")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg_path = Path(args.config).resolve()
+    cfg = load_config(cfg_path)
+    results_dir = cfg.results_dir
+    if not results_dir.is_absolute():
+        results_dir = (cfg_path.parent / results_dir).resolve()
+    results_dir.mkdir(parents=True, exist_ok=True)
+    policies = cfg.data.get("policies", [])
+    missing = []
+
+    for policy in policies:
+        path = results_dir / f"policy_outputs_{policy}_{args.split}.npz"
+        if not path.exists():
+            missing.append(str(path))
+            continue
+        data = np.load(path, allow_pickle=True)
+        bins = data["action_bin"]
+        sofa = data["sofa_bucket"]
+        counts = np.zeros((5, 5), dtype=int)
+        for vaso_bin, iv_bin in bins:
+            counts[iv_bin, vaso_bin] += 1
+
+        plot_heatmap(counts, f"{policy} overall", results_dir / f"action_heatmap_{policy}_overall.png")
+        for bucket in ["low", "medium", "high"]:
+            mask = sofa == bucket
+            bucket_counts = np.zeros((5, 5), dtype=int)
+            for vaso_bin, iv_bin in bins[mask]:
+                bucket_counts[iv_bin, vaso_bin] += 1
+            plot_heatmap(
+                bucket_counts,
+                f"{policy} sofa {bucket}",
+                results_dir / f"action_heatmap_{policy}_sofa_{bucket}.png",
+            )
+
+        df = pd.DataFrame(counts, columns=[f"vaso_{i}" for i in range(5)])
+        df.insert(0, "iv_bin", list(range(5)))
+        df["row_total"] = df[[f"vaso_{i}" for i in range(5)]].sum(axis=1)
+        df.to_csv(results_dir / f"action_counts_{policy}.csv", index=False)
+
+        long_counts = []
+        for iv_bin in range(5):
+            for vaso_bin in range(5):
+                action_id = iv_bin * 5 + vaso_bin
+                long_counts.append(
+                    {
+                        "action_id": action_id,
+                        "iv_bin": iv_bin,
+                        "vaso_bin": vaso_bin,
+                        "count": int(counts[iv_bin, vaso_bin]),
+                        "is_no_iv_no_vaso": bool(action_id == 0),
+                    }
+                )
+        pd.DataFrame(long_counts).to_csv(
+            results_dir / f"action_counts_{policy}_long.csv", index=False
+        )
+
+    if missing:
+        print("[warn] Missing policy output files (run expert/* with --train_or_load --eval_split first):")
+        for item in missing:
+            print(f"  - {item}")
+
+
+if __name__ == "__main__":
+    main()
